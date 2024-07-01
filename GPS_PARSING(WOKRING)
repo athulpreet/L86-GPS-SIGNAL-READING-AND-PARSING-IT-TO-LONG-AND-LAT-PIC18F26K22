@@ -1,0 +1,175 @@
+#include <xc.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+
+// Configuration bits (for PIC18F26K22 with external 4MHz crystal)
+#pragma config FOSC = HSMP      // External High Speed Medium Power Crystal Oscillator
+#pragma config PLLCFG = OFF     // 4X PLL disabled
+#pragma config PRICLKEN = ON    // Primary clock enabled
+#pragma config FCMEN = OFF      // Fail-Safe Clock Monitor disabled
+#pragma config IESO = OFF       // Internal/External Oscillator Switchover bit
+#pragma config WDTEN = OFF      // Watchdog Timer disabled
+#pragma config PBADEN = OFF     // PORTB<5:0> pins are configured as digital I/O on Reset
+#pragma config LVP = OFF        // Single-Supply ICSP disabled
+#pragma config MCLRE = EXTMCLR  // MCLR pin enabled; RE3 input disabled
+
+#define _XTAL_FREQ 4000000      // Define oscillator frequency for __delay_ms()
+#define GPS_BUFFER_SIZE 128     // Size of GPS data buffer
+
+// Function prototypes
+void SYSTEM_Initialize(void);
+void UART_Initialize(void);
+void UART_TransmitChar(char c);
+void UART_TransmitString(const char* str);
+bool UART_DataAvailable(void);
+char UART_ReceiveChar(void);
+void parseGPSData(const char* gpsData);
+void convertToDecimalDegrees(const char* nmea, char* result);
+
+char gpsBuffer[GPS_BUFFER_SIZE];
+uint8_t bufferIndex = 0;
+bool newDataAvailable = false;
+
+void __interrupt() ISR(void)
+{
+    if(PIR1bits.RC1IF)
+    {
+        char receivedChar = RCREG1;
+        if(bufferIndex < GPS_BUFFER_SIZE - 1)
+        {
+            gpsBuffer[bufferIndex++] = receivedChar;
+            if(receivedChar == '\n')
+            {
+                gpsBuffer[bufferIndex] = '\0';
+                newDataAvailable = true;
+                bufferIndex = 0;
+            }
+        }
+        else
+        {
+            bufferIndex = 0; // Reset if buffer is full
+        }
+        PIR1bits.RC1IF = 0; // Clear the interrupt flag
+    }
+}
+
+void main(void)
+{
+    SYSTEM_Initialize();
+    
+    // Enable global and peripheral interrupts
+    INTCONbits.GIE = 1;
+    INTCONbits.PEIE = 1;
+    
+    UART_TransmitString("GPS Tracker Initialized\r\n");
+    
+    while(1)
+    {
+        if(newDataAvailable)
+        {
+            parseGPSData(gpsBuffer);
+            newDataAvailable = false;
+        }
+    }
+}
+
+void SYSTEM_Initialize(void)
+{
+    UART_Initialize();
+}
+
+void UART_Initialize(void)
+{
+    // Set UART1 pins
+    ANSELCbits.ANSC7 = 0;  // Disable analog function for RC7
+    ANSELCbits.ANSC6 = 0;  // Disable analog function for RC6
+    TRISCbits.TRISC6 = 0;  // TX1 pin as output
+    TRISCbits.TRISC7 = 1;  // RX1 pin as input
+    
+    // Configure UART1
+    TXSTA1bits.TXEN = 1;   // Enable transmitter
+    RCSTA1bits.SPEN = 1;   // Enable serial port
+    RCSTA1bits.CREN = 1;   // Enable continuous reception
+    
+    // Set baud rate to 9600
+    BAUDCON1bits.BRG16 = 1;  // Use 16-bit baud rate generator
+    TXSTA1bits.BRGH = 1;     // High-speed baud rate
+    SPBRGH1 = 0;             // For 9600 baud at 4MHz
+    SPBRG1 = 103;            // 103 for 9600 baud
+    
+    // Enable UART receive interrupt
+    PIE1bits.RC1IE = 1;
+}
+
+void UART_TransmitChar(char c)
+{
+    while(!PIR1bits.TX1IF);  // Wait for transmit buffer to be empty
+    TXREG1 = c;
+}
+
+void UART_TransmitString(const char* str)
+{
+    while(*str != '\0')
+    {
+        UART_TransmitChar(*str);
+        str++;
+    }
+}
+
+void parseGPSData(const char* gpsData)
+{
+    if(strncmp(gpsData, "$GNRMC,", 7) == 0)
+    {
+        char latitude[15] = {0};
+        char longitude[15] = {0};
+        char latDirection, lonDirection;
+        char* token;
+        int field = 0;
+        
+        token = strtok((char*)gpsData, ",");
+        while(token != NULL)
+        {
+            if(field == 3) // Latitude
+            {
+                strncpy(latitude, token, sizeof(latitude) - 1);
+            }
+            else if(field == 4) // Latitude direction
+            {
+                latDirection = token[0];
+            }
+            else if(field == 5) // Longitude
+            {
+                strncpy(longitude, token, sizeof(longitude) - 1);
+            }
+            else if(field == 6) // Longitude direction
+            {
+                lonDirection = token[0];
+            }
+            token = strtok(NULL, ",");
+            field++;
+        }
+        
+        if(latitude[0] != '\0' && longitude[0] != '\0')
+        {
+            char latDecimal[15], lonDecimal[15];
+            convertToDecimalDegrees(latitude, latDecimal);
+            convertToDecimalDegrees(longitude, lonDecimal);
+            
+            char buffer[50];
+            sprintf(buffer, "Lat: %s%c, Long: %s%c\r\n", latDecimal, latDirection, lonDecimal, lonDirection);
+            UART_TransmitString(buffer);
+        }
+    }
+}
+
+void convertToDecimalDegrees(const char* nmea, char* result)
+{
+    double value = atof(nmea);
+    int degrees = (int)(value / 100);
+    double minutes = value - (degrees * 100);
+    double decimalDegrees = degrees + (minutes / 60.0);
+    sprintf(result, "%.6f", decimalDegrees);
+}
